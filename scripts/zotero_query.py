@@ -2,10 +2,6 @@
 """
 Zotero Library Query Tool
 Read literature metadata and locate PDF files from a local Zotero installation.
-
-Configuration:
-- Priority order: --zotero-dir flag > ZOTERO_DIR env var > auto-detect
-- Auto-detects common Zotero data directory locations on Windows/macOS/Linux.
 """
 
 import argparse
@@ -16,18 +12,14 @@ import sys
 
 
 def find_zotero_dir():
-    """Auto-detect Zotero data directory from common locations."""
+    """Auto-detect Zotero data directory."""
     candidates = []
-
-    # Check environment variable first
-    env_dir = os.environ.get('ZOTERO_DIR')
-    if env_dir and os.path.isfile(os.path.join(env_dir, 'zotero.sqlite')):
-        return env_dir
-
     if sys.platform == 'win32':
         app_data = os.environ.get('APPDATA', '')
         user_profile = os.environ.get('USERPROFILE', '')
+        # Known full library locations (checked first)
         candidates = [
+            r'E:\2-学习文件\1-——学术研究——\Zotero',
             os.path.join(user_profile, 'Zotero'),
             os.path.join(app_data, 'Zotero', 'Zotero', 'Profiles'),
         ]
@@ -36,25 +28,21 @@ def find_zotero_dir():
             if os.path.isdir(profiles_dir):
                 for p in os.listdir(profiles_dir):
                     candidates.append(os.path.join(profiles_dir, p, 'zotero'))
-
     elif sys.platform == 'darwin':
         home = os.path.expanduser('~')
         candidates = [
             os.path.join(home, 'Zotero'),
             os.path.join(home, 'Library', 'Application Support', 'Zotero'),
         ]
-
     else:
         home = os.path.expanduser('~')
         candidates = [
             os.path.join(home, 'Zotero'),
             os.path.join(home, '.zotero'),
         ]
-
     for c in candidates:
         if os.path.isfile(os.path.join(c, 'zotero.sqlite')):
             return c
-
     return None
 
 
@@ -77,7 +65,6 @@ def get_storage_path(zotero_dir=None):
 
 
 def get_connection(db_path):
-    """Open read-only connection (safe while Zotero is running)."""
     uri = f'file:{db_path}?mode=ro&immutable=1'
     conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
@@ -85,7 +72,6 @@ def get_connection(db_path):
 
 
 def get_item_basic(conn, item_id):
-    """Get title, date, abstract, authors, key, type for one item."""
     cur = conn.execute("""
         SELECT v.value FROM itemData d
         JOIN itemDataValues v ON d.valueID = v.valueID
@@ -147,7 +133,6 @@ def get_item_basic(conn, item_id):
 
 
 def get_pdf_paths(conn, item_id, storage_path):
-    """Resolve full filesystem paths for PDF attachments of an item."""
     cur = conn.execute("""
         SELECT att.path, att_item.key as att_key
         FROM itemAttachments att
@@ -176,27 +161,6 @@ def get_tags(conn, item_id):
         WHERE it.itemID = ?
     """, (item_id,))
     return [r['name'] for r in cur.fetchall()]
-
-
-def get_collections(conn):
-    """Get all collections."""
-    cur = conn.execute("""
-        SELECT collectionID, collectionName, parentCollectionID, key
-        FROM collections
-        ORDER BY parentCollectionID, collectionName
-    """)
-    return [dict(r) for r in cur.fetchall()]
-
-
-def get_collection_items(conn, collection_name):
-    """Get item IDs for items in a specific collection."""
-    cur = conn.execute("""
-        SELECT ci.itemID
-        FROM collectionItems ci
-        JOIN collections c ON ci.collectionID = c.collectionID
-        WHERE c.collectionName = ?
-    """, (collection_name,))
-    return [r['itemID'] for r in cur.fetchall()]
 
 
 def _load_items(conn, storage_path, item_ids):
@@ -234,7 +198,6 @@ def cmd_list(args):
     storage_path = get_storage_path(args.zotero_dir)
     if not db_path:
         print("ERROR: Zotero data directory not found.", file=sys.stderr)
-        print("Set ZOTERO_DIR env var or use --zotero-dir <path>", file=sys.stderr)
         sys.exit(1)
     conn = get_connection(db_path)
     cur = conn.execute("""
@@ -262,7 +225,6 @@ def cmd_search(args):
     storage_path = get_storage_path(args.zotero_dir)
     if not db_path:
         print("ERROR: Zotero data directory not found.", file=sys.stderr)
-        print("Set ZOTERO_DIR env var or use --zotero-dir <path>", file=sys.stderr)
         sys.exit(1)
     conn = get_connection(db_path)
     keyword = f'%{args.keyword}%'
@@ -352,7 +314,12 @@ def cmd_collections(args):
         print("ERROR: Zotero data directory not found.", file=sys.stderr)
         sys.exit(1)
     conn = get_connection(db_path)
-    results = get_collections(conn)
+    cur = conn.execute("""
+        SELECT collectionID, collectionName, parentCollectionID, key
+        FROM collections
+        ORDER BY parentCollectionID, collectionName
+    """)
+    results = [dict(r) for r in cur.fetchall()]
     conn.close()
     if args.format == 'json':
         print(json.dumps(results, ensure_ascii=False, indent=2))
@@ -361,25 +328,6 @@ def cmd_collections(args):
         for r in results:
             indent = "  " if r['parentCollectionID'] else ""
             print(f"{indent}- {r['collectionName']} (key: {r['key']})")
-
-
-def cmd_collection_items(args):
-    """List items in a specific collection."""
-    db_path = get_db_path(args.zotero_dir)
-    storage_path = get_storage_path(args.zotero_dir)
-    if not db_path:
-        print("ERROR: Zotero data directory not found.", file=sys.stderr)
-        sys.exit(1)
-    conn = get_connection(db_path)
-    item_ids = get_collection_items(conn, args.collection_name)
-    if args.limit:
-        item_ids = item_ids[:args.limit]
-    results = _load_items(conn, storage_path, item_ids)
-    conn.close()
-    if args.format == 'json':
-        print(json.dumps(results, ensure_ascii=False, indent=2))
-    else:
-        _print_item_list(results, keyword=f"collection: {args.collection_name}")
 
 
 def cmd_info(args):
@@ -405,8 +353,7 @@ def cmd_info(args):
 
 def main():
     parser = argparse.ArgumentParser(description='Zotero Library Query Tool')
-    parser.add_argument('--zotero-dir',
-                        help='Path to Zotero data directory (or set ZOTERO_DIR env var)')
+    parser.add_argument('--zotero-dir', help='Path to Zotero data directory (auto-detected if omitted)')
     subparsers = parser.add_subparsers(dest='command', help='Command to run')
 
     p_list = subparsers.add_parser('list', help='List all items with PDFs')
@@ -428,12 +375,6 @@ def main():
     p_coll = subparsers.add_parser('collections', help='List all collections')
     p_coll.add_argument('--format', choices=['text', 'json'], default='text', help='Output format')
 
-    p_coll_items = subparsers.add_parser('collection-items',
-                                          help='List items in a specific collection')
-    p_coll_items.add_argument('collection_name', help='Collection name')
-    p_coll_items.add_argument('--limit', type=int, help='Max number of items')
-    p_coll_items.add_argument('--format', choices=['text', 'json'], default='text', help='Output format')
-
     subparsers.add_parser('info', help='Show Zotero paths and library stats')
 
     args = parser.parse_args()
@@ -446,7 +387,6 @@ def main():
         'get-pdf': cmd_get_pdf,
         'tags': cmd_tags,
         'collections': cmd_collections,
-        'collection-items': cmd_collection_items,
         'info': cmd_info,
     }
     commands[args.command](args)
